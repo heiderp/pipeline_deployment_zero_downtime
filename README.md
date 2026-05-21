@@ -4,7 +4,9 @@ Proof of Concept for a continuous delivery pipeline with **Blue/Green deployment
 
 ## Quick Links
 
+- **[📖 Step-by-Step Guide](./docs/step-by-step.md)** — Full walkthrough from zero to production.
 - **[AGENTS.md](./AGENTS.md)** — Project map, restrictions, directory index, and conventions.
+- **[GitHub Secrets Setup](./docs/github-secrets.md)** — Required secrets and IAM configuration.
 - **[patterns/architecture.md](./patterns/architecture.md)** — System architecture and data flow.
 - **[patterns/blue-green.md](./patterns/blue-green.md)** — Blue/Green deployment strategy details.
 - **[patterns/rollback.md](./patterns/rollback.md)** — Automatic rollback strategy.
