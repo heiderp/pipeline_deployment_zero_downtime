@@ -32,14 +32,54 @@ output "ecs_cluster_arn" {
   value       = aws_ecs_cluster.main.arn
 }
 
-output "blue_target_group_arn" {
-  description = "Blue target group ARN"
-  value       = aws_lb_target_group.blue.arn
+output "alb_listener_arn" {
+  description = "ALB listener ARN"
+  value       = aws_lb_listener.main.arn
 }
 
-output "green_target_group_arn" {
-  description = "Green target group ARN"
-  value       = aws_lb_target_group.green.arn
+output "flask_listener_rule_arn" {
+  description = "Flask listener rule ARN"
+  value       = aws_lb_listener_rule.flask.arn
+}
+
+output "node_listener_rule_arn" {
+  description = "Node listener rule ARN"
+  value       = aws_lb_listener_rule.node.arn
+}
+
+output "spring_listener_rule_arn" {
+  description = "Spring listener rule ARN"
+  value       = aws_lb_listener_rule.spring.arn
+}
+
+output "flask_blue_tg_arn" {
+  description = "Flask blue target group ARN"
+  value       = aws_lb_target_group.flask_blue.arn
+}
+
+output "flask_green_tg_arn" {
+  description = "Flask green target group ARN"
+  value       = aws_lb_target_group.flask_green.arn
+}
+
+output "node_blue_tg_arn" {
+  description = "Node blue target group ARN"
+  value       = aws_lb_target_group.node_blue.arn
+}
+
+output "node_green_tg_arn" {
+  description = "Node green target group ARN"
+  value       = aws_lb_target_group.node_green.arn
+}
+
+output "spring_blue_tg_arn" {
+  description = "Spring blue target group ARN"
+  value       = aws_lb_target_group.spring_blue.arn
+}
+
+output "spring_green_tg_arn" {
+  description = "Spring green target group ARN"
+  value       = aws_lb_target_group.spring_green.arn
 }
 
 output "rds_endpoint" {
@@ -80,4 +120,39 @@ output "ecs_task_execution_role_arn" {
 output "ecs_task_role_arn" {
   description = "ECS task role ARN"
   value       = aws_iam_role.ecs_task.arn
+}
+
+output "ecr_flask_url" {
+  description = "ECR repository URL for Flask app"
+  value       = aws_ecr_repository.flask.repository_url
+}
+
+output "ecr_node_url" {
+  description = "ECR repository URL for Node app"
+  value       = aws_ecr_repository.node.repository_url
+}
+
+output "ecr_spring_url" {
+  description = "ECR repository URL for Spring app"
+  value       = aws_ecr_repository.spring.repository_url
+}
+
+output "rollback_lambda_arn" {
+  description = "Rollback Lambda function ARN"
+  value       = aws_lambda_function.rollback.arn
+}
+
+output "flask_service_name" {
+  description = "Flask ECS service name"
+  value       = aws_ecs_service.flask.name
+}
+
+output "node_service_name" {
+  description = "Node ECS service name"
+  value       = aws_ecs_service.node.name
+}
+
+output "spring_service_name" {
+  description = "Spring ECS service name"
+  value       = aws_ecs_service.spring.name
 }

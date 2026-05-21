@@ -38,3 +38,6 @@ build/
 
 # Docker
 *.log
+
+# Lambda package
+infra/lambda/*.zip

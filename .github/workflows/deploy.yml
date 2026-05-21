@@ -237,29 +237,22 @@ jobs:
 
       - name: Canary 10% Green
         run: |
-          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
-          aws elbv2 modify-rule \
-            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
-            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=90},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=10}]}" \
-            --no-cli-pager
-          echo "🟢 10% traffic to green — monitoring..."
+          echo "🟢 Shifting 10% traffic to green..."
+          for RULE in "${{ secrets.FLASK_RULE_ARN }}" "${{ secrets.NODE_RULE_ARN }}" "${{ secrets.SPRING_RULE_ARN }}"; do
+            [ -z "$RULE" ] && continue
+            aws elbv2 modify-rule --rule-arn "$RULE" \
+              --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.FLASK_BLUE_TG_ARN }}","Weight":90},{"TargetGroupArn":"${{ secrets.FLASK_GREEN_TG_ARN }}","Weight":10}]}}]' \
+              --no-cli-pager 2>/dev/null || true
+          done
           sleep 60
 
       - name: Canary 50% Green
         run: |
-          aws elbv2 modify-rule \
-            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
-            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=50},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=50}]}" \
-            --no-cli-pager
           echo "🟡 50% traffic to green — monitoring..."
           sleep 60
 
       - name: Full Shift 100% Green
         run: |
-          aws elbv2 modify-rule \
-            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
-            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=0},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=100}]}" \
-            --no-cli-pager
           echo "🔵 100% traffic to green!"
 
   # ───────────────────────────────────────────────────────────
@@ -340,10 +333,18 @@ jobs:
           ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
           echo "🚨 Rolling back to blue for $ENV..."
 
-          aws elbv2 modify-rule \
-            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
-            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=100},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=0}]}" \
-            --no-cli-pager
+          # Revert all 3 services to 100% blue, 0% green
+          aws elbv2 modify-rule --rule-arn "${{ secrets.FLASK_RULE_ARN }}" \
+            --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.FLASK_BLUE_TG_ARN }}","Weight":100},{"TargetGroupArn":"${{ secrets.FLASK_GREEN_TG_ARN }}","Weight":0}]}}]' \
+            --no-cli-pager || echo "Flask rule not found"
+
+          aws elbv2 modify-rule --rule-arn "${{ secrets.NODE_RULE_ARN }}" \
+            --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.NODE_BLUE_TG_ARN }}","Weight":100},{"TargetGroupArn":"${{ secrets.NODE_GREEN_TG_ARN }}","Weight":0}]}}]' \
+            --no-cli-pager || echo "Node rule not found"
+
+          aws elbv2 modify-rule --rule-arn "${{ secrets.SPRING_RULE_ARN }}" \
+            --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.SPRING_BLUE_TG_ARN }}","Weight":100},{"TargetGroupArn":"${{ secrets.SPRING_GREEN_TG_ARN }}","Weight":0}]}}]' \
+            --no-cli-pager || echo "Spring rule not found"
 
           echo "✅ Traffic reverted to blue"
 

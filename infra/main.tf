@@ -77,8 +77,90 @@ resource "aws_ecs_cluster" "main" {
 }
 
 # ─────────────────────────────────────────────────────────────
-# ALB (Application Load Balancer)
+# ECR Repositories
 # ─────────────────────────────────────────────────────────────
+
+resource "aws_ecr_repository" "flask" {
+  name                 = "${var.environment}-flask-app"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  force_delete = var.environment != "prod"
+}
+
+resource "aws_ecr_repository" "node" {
+  name                 = "${var.environment}-node-app"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  force_delete = var.environment != "prod"
+}
+
+resource "aws_ecr_repository" "spring" {
+  name                 = "${var.environment}-spring-app"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  force_delete = var.environment != "prod"
+}
+
+# Lifecycle policy: keep last 10 images
+resource "aws_ecr_lifecycle_policy" "flask" {
+  repository = aws_ecr_repository.flask.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+resource "aws_ecr_lifecycle_policy" "node" {
+  repository = aws_ecr_repository.node.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+
+resource "aws_ecr_lifecycle_policy" "spring" {
+  repository = aws_ecr_repository.spring.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
 
 resource "aws_lb" "main" {
   name               = "${var.environment}-alb"
@@ -103,9 +185,14 @@ resource "aws_lb_listener" "main" {
   }
 }
 
-# Blue and Green target groups
-resource "aws_lb_target_group" "blue" {
-  name        = "${var.environment}-blue-tg"
+# ─────────────────────────────────────────────────────────────
+# ALB Target Groups (per-service Blue/Green pairs)
+# ─────────────────────────────────────────────────────────────
+
+# ── Flask (monolith) ────────────────────────────────────────
+
+resource "aws_lb_target_group" "flask_blue" {
+  name        = "${var.environment}-flask-blue"
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = module.vpc.vpc_id
@@ -120,13 +207,13 @@ resource "aws_lb_target_group" "blue" {
     matcher             = "200"
   }
 
-  stickiness {
-    type = "lb_cookie"
-  }
+  stickiness { type = "lb_cookie" }
+
+  tags = { Name = "${var.environment}-flask-blue" }
 }
 
-resource "aws_lb_target_group" "green" {
-  name        = "${var.environment}-green-tg"
+resource "aws_lb_target_group" "flask_green" {
+  name        = "${var.environment}-flask-green"
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = module.vpc.vpc_id
@@ -141,25 +228,116 @@ resource "aws_lb_target_group" "green" {
     matcher             = "200"
   }
 
-  stickiness {
-    type = "lb_cookie"
-  }
+  stickiness { type = "lb_cookie" }
+
+  tags = { Name = "${var.environment}-flask-green" }
 }
 
-# Listener rule with weighted forwarding for canary deployments
-resource "aws_lb_listener_rule" "app" {
+# ── Node (microservice) ─────────────────────────────────────
+
+resource "aws_lb_target_group" "node_blue" {
+  name        = "${var.environment}-node-blue"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = module.vpc.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  stickiness { type = "lb_cookie" }
+
+  tags = { Name = "${var.environment}-node-blue" }
+}
+
+resource "aws_lb_target_group" "node_green" {
+  name        = "${var.environment}-node-green"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = module.vpc.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  stickiness { type = "lb_cookie" }
+
+  tags = { Name = "${var.environment}-node-green" }
+}
+
+# ── Spring (microservice) ───────────────────────────────────
+
+resource "aws_lb_target_group" "spring_blue" {
+  name        = "${var.environment}-spring-blue"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = module.vpc.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  stickiness { type = "lb_cookie" }
+
+  tags = { Name = "${var.environment}-spring-blue" }
+}
+
+resource "aws_lb_target_group" "spring_green" {
+  name        = "${var.environment}-spring-green"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = module.vpc.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200"
+  }
+
+  stickiness { type = "lb_cookie" }
+
+  tags = { Name = "${var.environment}-spring-green" }
+}
+
+# ─────────────────────────────────────────────────────────────
+# ALB Listener Rules (path-based routing per service)
+# ─────────────────────────────────────────────────────────────
+
+resource "aws_lb_listener_rule" "flask" {
   listener_arn = aws_lb_listener.main.arn
-  priority     = 100
+  priority     = 110
 
   action {
     type = "forward"
     forward {
       target_group {
-        arn    = aws_lb_target_group.blue.arn
+        arn    = aws_lb_target_group.flask_blue.arn
         weight = var.blue_weight
       }
       target_group {
-        arn    = aws_lb_target_group.green.arn
+        arn    = aws_lb_target_group.flask_green.arn
         weight = var.green_weight
       }
     }
@@ -167,7 +345,57 @@ resource "aws_lb_listener_rule" "app" {
 
   condition {
     path_pattern {
-      values = ["/*"]
+      values = ["/flask/*", "/flask"]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "node" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 120
+
+  action {
+    type = "forward"
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.node_blue.arn
+        weight = var.blue_weight
+      }
+      target_group {
+        arn    = aws_lb_target_group.node_green.arn
+        weight = var.green_weight
+      }
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = ["/node/*", "/node"]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "spring" {
+  listener_arn = aws_lb_listener.main.arn
+  priority     = 130
+
+  action {
+    type = "forward"
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.spring_blue.arn
+        weight = var.blue_weight
+      }
+      target_group {
+        arn    = aws_lb_target_group.spring_green.arn
+        weight = var.green_weight
+      }
+    }
+  }
+
+  condition {
+    path_pattern {
+      values = ["/spring/*", "/spring"]
     }
   }
 }
@@ -381,15 +609,431 @@ resource "aws_iam_role_policy" "ecs_task_access" {
 }
 
 # ─────────────────────────────────────────────────────────────
-# ECS Task Definitions & Services
+# ECS Task Definitions
 # ─────────────────────────────────────────────────────────────
 
-# Placeholder — actual task definitions and services are environment-specific
-# and will reference ECR images built by the pipeline.
+locals {
+  container_definitions = {
+    flask = jsonencode([{
+      name         = "flask-app"
+      image        = "${aws_ecr_repository.flask.repository_url}:latest"
+      portMappings = [{ containerPort = 8080, protocol = "tcp" }]
+      environment = [
+        { name = "ENVIRONMENT", value = var.environment },
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "SNS_TOPIC_ARN", value = aws_sns_topic.events.arn },
+        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.tasks.url },
+        { name = "DATABASE_URL", value = "postgresql://${var.rds_username}:${var.rds_password}@${aws_db_instance.main.endpoint}/${var.rds_db_name}" },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.apps.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "flask"
+        }
+      }
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 15
+      }
+    }])
+
+    node = jsonencode([{
+      name         = "node-app"
+      image        = "${aws_ecr_repository.node.repository_url}:latest"
+      portMappings = [{ containerPort = 8080, protocol = "tcp" }]
+      environment = [
+        { name = "NODE_ENV", value = var.environment },
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.tasks.url },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.apps.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "node"
+        }
+      }
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 15
+      }
+    }])
+
+    spring = jsonencode([{
+      name         = "spring-app"
+      image        = "${aws_ecr_repository.spring.repository_url}:latest"
+      portMappings = [{ containerPort = 8080, protocol = "tcp" }]
+      environment = [
+        { name = "ENVIRONMENT", value = var.environment },
+        { name = "AWS_REGION", value = var.aws_region },
+        { name = "SNS_TOPIC_ARN", value = aws_sns_topic.events.arn },
+        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.tasks.url },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.apps.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "spring"
+        }
+      }
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30 # Java needs more time
+      }
+    }])
+  }
+}
+
+resource "aws_cloudwatch_log_group" "apps" {
+  name              = "/ecs/${var.environment}-apps"
+  retention_in_days = var.environment == "prod" ? 30 : 7
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_ecs_task_definition" "flask" {
+  family                   = "${var.environment}-flask"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+  container_definitions    = local.container_definitions.flask
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+}
+
+resource "aws_ecs_task_definition" "node" {
+  family                   = "${var.environment}-node"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+  container_definitions    = local.container_definitions.node
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+}
+
+resource "aws_ecs_task_definition" "spring" {
+  family                   = "${var.environment}-spring"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+  container_definitions    = local.container_definitions.spring
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "ARM64"
+  }
+}
 
 # ─────────────────────────────────────────────────────────────
-# CloudWatch Dashboard
+# ECS Services
 # ─────────────────────────────────────────────────────────────
+
+resource "aws_ecs_service" "flask" {
+  name            = "${var.environment}-flask"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.flask.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = module.vpc.private_subnets
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.flask_blue.arn
+    container_name   = "flask-app"
+    container_port   = 8080
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition, load_balancer]
+  }
+
+  depends_on = [aws_lb_listener_rule.flask]
+}
+
+resource "aws_ecs_service" "node" {
+  name            = "${var.environment}-node"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.node.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = module.vpc.private_subnets
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.node_blue.arn
+    container_name   = "node-app"
+    container_port   = 8080
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition, load_balancer]
+  }
+
+  depends_on = [aws_lb_listener_rule.node]
+}
+
+resource "aws_ecs_service" "spring" {
+  name            = "${var.environment}-spring"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.spring.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = module.vpc.private_subnets
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.spring_blue.arn
+    container_name   = "spring-app"
+    container_port   = 8080
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  lifecycle {
+    ignore_changes = [task_definition, load_balancer]
+  }
+
+  depends_on = [aws_lb_listener_rule.spring]
+}
+
+# ─────────────────────────────────────────────────────────────
+# Rollback Lambda
+# ─────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "rollback_lambda" {
+  name = "${var.environment}-rollback-lambda"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "rollback_lambda_basic" {
+  role       = aws_iam_role.rollback_lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "rollback_lambda_ecs" {
+  name = "${var.environment}-rollback-ecs-access"
+  role = aws_iam_role.rollback_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticloadbalancing:ModifyRule",
+          "elasticloadbalancing:DescribeRules",
+        ]
+        Resource = [
+          aws_lb_listener_rule.flask.arn,
+          aws_lb_listener_rule.node.arn,
+          aws_lb_listener_rule.spring.arn,
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+        ]
+        Resource = [
+          aws_ecs_service.flask.id,
+          aws_ecs_service.node.id,
+          aws_ecs_service.spring.id,
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = [aws_sns_topic.events.arn]
+      },
+    ]
+  })
+}
+
+resource "aws_lambda_function" "rollback" {
+  filename         = "${path.module}/lambda/rollback.zip"
+  function_name    = "${var.environment}-ecs-rollback"
+  role             = aws_iam_role.rollback_lambda.arn
+  handler          = "index.handler"
+  runtime          = "python3.12"
+  timeout          = 60
+  source_code_hash = filebase64sha256("${path.module}/lambda/rollback.zip")
+
+  environment {
+    variables = {
+      ENVIRONMENT         = var.environment
+      FLASK_RULE_ARN      = aws_lb_listener_rule.flask.arn
+      NODE_RULE_ARN       = aws_lb_listener_rule.node.arn
+      SPRING_RULE_ARN     = aws_lb_listener_rule.spring.arn
+      FLASK_BLUE_TG_ARN   = aws_lb_target_group.flask_blue.arn
+      FLASK_GREEN_TG_ARN  = aws_lb_target_group.flask_green.arn
+      NODE_BLUE_TG_ARN    = aws_lb_target_group.node_blue.arn
+      NODE_GREEN_TG_ARN   = aws_lb_target_group.node_green.arn
+      SPRING_BLUE_TG_ARN  = aws_lb_target_group.spring_blue.arn
+      SPRING_GREEN_TG_ARN = aws_lb_target_group.spring_green.arn
+      CLUSTER_NAME        = aws_ecs_cluster.main.name
+      FLASK_SERVICE       = aws_ecs_service.flask.name
+      NODE_SERVICE        = aws_ecs_service.node.name
+      SPRING_SERVICE      = aws_ecs_service.spring.name
+    }
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+# ─────────────────────────────────────────────────────────────
+# CloudWatch Alarms (trigger rollback Lambda)
+# ─────────────────────────────────────────────────────────────
+
+resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
+  alarm_name          = "${var.environment}-Green-HighErrorRate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = var.alarm_error_rate_threshold
+  alarm_description   = "Triggers rollback if 5XX errors exceed threshold on green"
+  alarm_actions       = [aws_lambda_function.rollback.arn]
+
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "high_latency" {
+  alarm_name          = "${var.environment}-Green-HighLatency"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "TargetResponseTime"
+  namespace           = "AWS/ApplicationELB"
+  extended_statistic  = "p99"
+  period              = 60
+  threshold           = var.alarm_latency_threshold_ms
+  alarm_description   = "Triggers rollback if p99 latency exceeds threshold on green"
+  alarm_actions       = [aws_lambda_function.rollback.arn]
+
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "low_throughput" {
+  alarm_name          = "${var.environment}-Green-LowThroughput"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "RequestCount"
+  namespace           = "AWS/ApplicationELB"
+  period              = 120
+  statistic           = "Sum"
+  threshold           = var.alarm_throughput_threshold
+  alarm_description   = "Triggers rollback if request count drops below threshold on green"
+  alarm_actions       = [aws_lambda_function.rollback.arn]
+
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "task_unhealthy" {
+  alarm_name          = "${var.environment}-Green-TaskUnhealthy"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "HealthyHostCount"
+  namespace           = "AWS/ApplicationELB"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 1
+  alarm_description   = "Triggers rollback if no healthy green tasks"
+  alarm_actions       = [aws_lambda_function.rollback.arn]
+
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+    TargetGroup  = aws_lb_target_group.flask_green.arn_suffix
+  }
+
+  tags = {
+    Environment = var.environment
+  }
+}
 
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = "${var.environment}-pipeline-dashboard"

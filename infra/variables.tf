@@ -124,3 +124,43 @@ variable "ecr_repo_urls" {
   type        = map(string)
   default     = {}
 }
+
+# ── ECS Tasks ───────────────────────────────────────────────
+
+variable "task_cpu" {
+  description = "CPU units for Fargate tasks (256 = 0.25 vCPU)"
+  type        = number
+  default     = 256
+}
+
+variable "task_memory" {
+  description = "Memory for Fargate tasks (MiB)"
+  type        = number
+  default     = 512
+}
+
+variable "desired_count" {
+  description = "Number of tasks to run per service"
+  type        = number
+  default     = 1
+}
+
+# ── CloudWatch Alarm Thresholds ─────────────────────────────
+
+variable "alarm_error_rate_threshold" {
+  description = "5XX error count threshold that triggers rollback"
+  type        = number
+  default     = 5
+}
+
+variable "alarm_latency_threshold_ms" {
+  description = "p99 latency threshold (ms) that triggers rollback"
+  type        = number
+  default     = 2000
+}
+
+variable "alarm_throughput_threshold" {
+  description = "Minimum request count per 2min before rollback"
+  type        = number
+  default     = 10
+}
