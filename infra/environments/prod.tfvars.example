@@ -1,0 +1,26 @@
+# Production environment variables
+environment = "prod"
+
+aws_region = "us-east-1"
+
+vpc_cidr            = "10.2.0.0/16"
+private_subnet_cidrs = ["10.2.1.0/24", "10.2.2.0/24"]
+public_subnet_cidrs  = ["10.2.101.0/24", "10.2.102.0/24"]
+
+rds_instance_class     = "db.t4g.medium"
+rds_allocated_storage = 100
+rds_db_name           = "appdb"
+
+blue_weight  = 100
+green_weight = 0
+
+tf_state_bucket      = "CHANGE_ME-tfstate-bucket"
+tf_state_lock_table  = "CHANGE_ME-tfstate-lock"
+rds_username         = "CHANGE_ME"
+rds_password         = "CHANGE_ME"
+slack_webhook_url    = "CHANGE_ME"
+ecr_repo_urls = {
+  flask  = "CHANGE_ME.dkr.ecr.us-east-1.amazonaws.com/flask-app"
+  node   = "CHANGE_ME.dkr.ecr.us-east-1.amazonaws.com/node-app"
+  spring = "CHANGE_ME.dkr.ecr.us-east-1.amazonaws.com/spring-app"
+}

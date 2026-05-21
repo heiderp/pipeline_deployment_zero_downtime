@@ -1,0 +1,39 @@
+# Local Pi runtime state
+.atl/
+.pi/
+
+# Environment
+.env
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfvars
+!infra/environments/*.tfvars.example
+infra/tfplan
+infra/.terraform.lock.hcl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+test-results/
+*.pyc
+__pycache__/
+node_modules/
+.gradle/
+build/
+*.jar
+*.war
+
+# Docker
+*.log

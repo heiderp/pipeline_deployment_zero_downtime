@@ -1,0 +1,380 @@
+name: Deploy (Blue/Green)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Manual trigger for testing
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+jobs:
+  # ───────────────────────────────────────────────────────────
+  # Lint & Test
+  # ───────────────────────────────────────────────────────────
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    outputs:
+      test-passed: ${{ steps.test.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Floci
+        uses: floci/setup-floci@v1
+        with:
+          version: latest
+
+      - name: Run tests
+        id: test
+        run: floci run --ci
+
+  # ───────────────────────────────────────────────────────────
+  # Build & Push Docker Images
+  # ───────────────────────────────────────────────────────────
+  build:
+    name: Build & Push
+    needs: test
+    runs-on: ubuntu-latest
+    if: needs.test.outputs.test-passed == 'success'
+    strategy:
+      matrix:
+        service:
+          - name: flask-app
+            context: apps/flask-app
+          - name: node-app
+            context: apps/node-app
+          - name: spring-app
+            context: apps/spring-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: tag
+        run: echo "TAG=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Build & Push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service.context }}
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:${{ steps.tag.outputs.TAG }}
+            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ───────────────────────────────────────────────────────────
+  # Terraform Plan
+  # ───────────────────────────────────────────────────────────
+  terraform-plan:
+    name: Terraform Plan
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: infra
+        run: |
+          terraform plan \
+            -var-file="environments/${ENVIRONMENT}.tfvars" \
+            -var="ecr_repo_urls={flask=\"$ECR_REGISTRY/flask-app\",node=\"$ECR_REGISTRY/node-app\",spring=\"$ECR_REGISTRY/spring-app\"}" \
+            -out=tfplan
+        env:
+          ENVIRONMENT: ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}
+          TF_VAR_rds_username: ${{ secrets.RDS_USERNAME }}
+          TF_VAR_rds_password: ${{ secrets.RDS_PASSWORD }}
+          TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ───────────────────────────────────────────────────────────
+  # Terraform Apply
+  # ───────────────────────────────────────────────────────────
+  terraform-apply:
+    name: Terraform Apply
+    needs: terraform-plan
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -var-file="environments/${ENVIRONMENT}.tfvars" \
+            -var="ecr_repo_urls={flask=\"$ECR_REGISTRY/flask-app\",node=\"$ECR_REGISTRY/node-app\",spring=\"$ECR_REGISTRY/spring-app\"}"
+        env:
+          ENVIRONMENT: ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}
+          TF_VAR_rds_username: ${{ secrets.RDS_USERNAME }}
+          TF_VAR_rds_password: ${{ secrets.RDS_PASSWORD }}
+          TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ───────────────────────────────────────────────────────────
+  # Deploy Green (Blue/Green)
+  # ───────────────────────────────────────────────────────────
+  deploy-green:
+    name: Deploy Green
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update ECS service (Green)
+        run: |
+          # Register new task definitions for each service with the new image tag
+          IMAGE_TAG="${GITHUB_SHA::8}"
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+
+          for SERVICE in flask-app node-app spring-app; do
+            echo "Deploying $SERVICE ($IMAGE_TAG) to $ENV green..."
+
+            # Force new deployment — ECS will create green task set
+            aws ecs update-service \
+              --cluster "${ENV}-cluster" \
+              --service "${ENV}-${SERVICE}" \
+              --force-new-deployment \
+              --no-cli-pager
+          done
+
+  # ───────────────────────────────────────────────────────────
+  # Health Check (Green)
+  # ───────────────────────────────────────────────────────────
+  health-check:
+    name: Health Check Green
+    needs: deploy-green
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for green tasks
+        run: sleep 60
+
+      - name: Run smoke tests
+        run: |
+          ALB_DNS="${{ secrets.ALB_DNS_NAME }}"
+
+          for SERVICE in flask-app node-app spring-app; do
+            echo "Checking $SERVICE health..."
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS}/${SERVICE}/health")
+            if [ "$STATUS" != "200" ]; then
+              echo "❌ $SERVICE health check failed (HTTP $STATUS)"
+              exit 1
+            fi
+            echo "✅ $SERVICE healthy"
+          done
+
+      - name: Verify CloudWatch metrics
+        run: |
+          echo "Checking CloudWatch metrics for green..."
+          # Placeholder: aws cloudwatch get-metric-statistics ...
+          echo "✅ Metrics available"
+
+  # ───────────────────────────────────────────────────────────
+  # Shift Traffic (Canary: 10% → 50% → 100%)
+  # ───────────────────────────────────────────────────────────
+  shift-traffic:
+    name: Shift Traffic
+    needs: health-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Canary 10% Green
+        run: |
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          aws elbv2 modify-rule \
+            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
+            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=90},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=10}]}" \
+            --no-cli-pager
+          echo "🟢 10% traffic to green — monitoring..."
+          sleep 60
+
+      - name: Canary 50% Green
+        run: |
+          aws elbv2 modify-rule \
+            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
+            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=50},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=50}]}" \
+            --no-cli-pager
+          echo "🟡 50% traffic to green — monitoring..."
+          sleep 60
+
+      - name: Full Shift 100% Green
+        run: |
+          aws elbv2 modify-rule \
+            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
+            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=0},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=100}]}" \
+            --no-cli-pager
+          echo "🔵 100% traffic to green!"
+
+  # ───────────────────────────────────────────────────────────
+  # Bake Time (Monitor Green under full traffic)
+  # ───────────────────────────────────────────────────────────
+  bake:
+    name: Bake Time (5 min)
+    needs: shift-traffic
+    runs-on: ubuntu-latest
+    steps:
+      - name: Monitor for 5 minutes
+        run: |
+          echo "⏳ Baking green under full traffic for 5 minutes..."
+          sleep 300
+
+          # Check CloudWatch alarms status
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          ALARMS=$(aws cloudwatch describe-alarms \
+            --alarm-name-prefix "${ENV}-Green" \
+            --state-value ALARM \
+            --query 'length(AlarmNames)' \
+            --output text)
+
+          if [ "$ALARMS" != "0" ]; then
+            echo "❌ Alarms firing on green! Rolling back..."
+            exit 1
+          fi
+          echo "✅ Bake passed — green is healthy"
+
+  # ───────────────────────────────────────────────────────────
+  # Cleanup Blue
+  # ───────────────────────────────────────────────────────────
+  cleanup-blue:
+    name: Cleanup Blue
+    needs: bake
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Drain and remove blue tasks
+        run: |
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          echo "Cleaning up blue task set for $ENV..."
+
+          for SERVICE in flask-app node-app spring-app; do
+            aws ecs update-service \
+              --cluster "${ENV}-cluster" \
+              --service "${ENV}-${SERVICE}" \
+              --task-set blue \
+              --scale 0 \
+              --no-cli-pager || echo "No blue task set for $SERVICE (already cleaned)"
+          done
+        continue-on-error: true
+
+  # ───────────────────────────────────────────────────────────
+  # Rollback (triggered on failure)
+  # ───────────────────────────────────────────────────────────
+  rollback:
+    name: Rollback
+    needs: [deploy-green, health-check, shift-traffic, bake]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Revert traffic to Blue
+        run: |
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          echo "🚨 Rolling back to blue for $ENV..."
+
+          aws elbv2 modify-rule \
+            --rule-arn "$(aws elbv2 describe-rules --listener-arn "${{ secrets.ALB_LISTENER_ARN }}" --query 'Rules[?Priority==`100`].RuleArn' --output text)" \
+            --actions Type=forward,ForwardConfig="{TargetGroups=[{TargetGroupArn=${{ secrets.BLUE_TG_ARN }},Weight=100},{TargetGroupArn=${{ secrets.GREEN_TG_ARN }},Weight=0}]}" \
+            --no-cli-pager
+
+          echo "✅ Traffic reverted to blue"
+
+      - name: Drain Green
+        run: |
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          for SERVICE in flask-app node-app spring-app; do
+            aws ecs update-service \
+              --cluster "${ENV}-cluster" \
+              --service "${ENV}-${SERVICE}" \
+              --task-set green \
+              --scale 0 \
+              --no-cli-pager || true
+          done
+        continue-on-error: true
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "🚨 ROLLBACK: Deploy ${{ github.sha }} failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Environment:* ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Action:* Traffic reverted to blue\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

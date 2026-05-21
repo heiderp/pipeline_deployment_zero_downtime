@@ -1,0 +1,27 @@
+# Dev environment variables
+environment = "dev"
+
+aws_region = "us-east-1"
+
+vpc_cidr            = "10.0.0.0/16"
+private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24"]
+
+rds_instance_class     = "db.t4g.micro"
+rds_allocated_storage = 20
+rds_db_name           = "appdb"
+
+# Blue/Green traffic weights (initial: all traffic to blue)
+blue_weight  = 100
+green_weight = 0
+
+tf_state_bucket      = "CHANGE_ME-tfstate-bucket"
+tf_state_lock_table  = "CHANGE_ME-tfstate-lock"
+rds_username         = "CHANGE_ME"
+rds_password         = "CHANGE_ME"
+slack_webhook_url    = ""
+ecr_repo_urls = {
+  flask  = "CHANGE_ME.dkr.ecr.us-east-1.amazonaws.com/flask-app"
+  node   = "CHANGE_ME.dkr.ecr.us-east-1.amazonaws.com/node-app"
+  spring = "CHANGE_ME.dkr.ecr.us-east-1.amazonaws.com/spring-app"
+}

@@ -1,0 +1,71 @@
+# Floci configuration for local testing
+# https://floci.dev/docs/configuration
+
+version: "1"
+
+project:
+  name: pipeline-deployment-zero-downtime
+  description: PoC CI/CD Blue/Green deployment pipeline on AWS ECS
+
+# ── Test suites ──────────────────────────────────────────────
+
+suites:
+  # Unit tests for the Flask monolith
+  flask-unit:
+    name: "Flask App — Unit Tests"
+    working_dir: apps/flask-app
+    command: python -m pytest tests/ -v --tb=short
+    env:
+      FLASK_ENV: test
+      DATABASE_URL: "sqlite:///:memory:"
+
+  # Unit tests for the Node microservice
+  node-unit:
+    name: "Node App — Unit Tests"
+    working_dir: apps/node-app
+    command: npm test -- --ci --verbose
+    env:
+      NODE_ENV: test
+
+  # Unit tests for the Spring microservice
+  spring-unit:
+    name: "Spring App — Unit Tests"
+    working_dir: apps/spring-app
+    command: ./gradlew test --console=plain
+    env:
+      SPRING_PROFILES_ACTIVE: test
+
+# ── Composite workflows ──────────────────────────────────────
+
+workflows:
+  # Run all unit tests
+  test-all:
+    name: "All Unit Tests"
+    suites:
+      - flask-unit
+      - node-unit
+      - spring-unit
+
+  # Run before pushing (pre-commit hook equivalent)
+  pre-push:
+    name: "Pre-Push Checks"
+    suites:
+      - flask-unit
+      - node-unit
+      - spring-unit
+
+# ── CI mode (used by GitHub Actions) ─────────────────────────
+
+ci:
+  suites:
+    - flask-unit
+    - node-unit
+    - spring-unit
+  format: junit
+  output: test-results/
+  fail_fast: false
+
+# ── Environment defaults ─────────────────────────────────────
+
+env:
+  AWS_REGION: us-east-1
