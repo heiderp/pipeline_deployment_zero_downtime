@@ -79,23 +79,23 @@ All contributors and agents MUST respect these constraints:
 
 ## Best Practices (AWS Expert Recommendations)
 
-### Blue/Green on ECS (Native, 2025)
+### Blue/Green on ECS (CodeDeploy)
 
-Amazon ECS now supports **native Blue/Green deployments** without AWS CodeDeploy. The deployment lifecycle has six phases:
+This project uses **AWS CodeDeploy** to orchestrate Blue/Green deployments on ECS.
+CodeDeploy handles the complete lifecycle:
 
-1. **Preparation** — Register new task definition, create green task set.
-2. **Deployment** — Launch green tasks, wait for steady state.
-3. **Testing** — Run validation (health checks, smoke tests).
-4. **Traffic Shift** — Move ALB traffic from blue to green (can be gradual: canary or linear).
-5. **Monitoring (Bake Time)** — Observe green for N minutes under real traffic.
-6. **Cleanup** — Drain and terminate blue tasks.
+1. **Preparation** — Register new task definition, create CodeDeploy deployment.
+2. **Deployment** — Launch green task set on test listener (port 8081).
+3. **Canary Shift** — Gradual traffic shift from blue to green (10% every 5 minutes).
+4. **Bake** — Green runs under full production traffic while alarms monitor.
+5. **Cleanup** — Drain and terminate blue tasks.
 
 ### Rollback Strategy
 
-- **CloudWatch Alarms** monitor green: error rate > 5%, p99 latency > 2s, throughput drop > 20%.
-- On alarm breach → **Lambda function** triggers ECS `rollback` API to revert traffic to blue.
-- Team is **notified via Slack/email** (success and failure).
-- The commit that caused the failure is **tagged** in git for post-mortem.
+- **CodeDeploy** auto-rolls back if CloudWatch alarms fire during deployment (error rate > 5%, p99 latency > 2s, throughput drop).
+- **Notification Lambda** publishes alarm events to SNS (→ Slack/email) for visibility.
+- **GitHub Actions rollback job** posts deployment-level context if any step fails.
+- Rollback is instant — traffic reverts to blue with no manual intervention.
 
 ### Terraform Conventions
 
@@ -106,16 +106,16 @@ Amazon ECS now supports **native Blue/Green deployments** without AWS CodeDeploy
 
 ### Pipeline (GitHub Actions)
 
-- Single workflow file triggers on `push` to `main`.
-- Steps: lint → test → build images → push to ECR → Terraform apply → deploy ECS (Blue/Green) → health check → bake → cleanup or rollback.
-- AWS credentials stored as **GitHub Secrets** (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
-- ECR repository URL and ECS cluster/service names passed as workflow variables.
+- Single workflow triggers on `push` to `main`.
+- Steps: lint → test → build → push to ECR → Terraform apply → CodeDeploy deployment → wait → health check.
+- CodeDeploy handles traffic shift, bake, cleanup, and auto-rollback.
+- AWS credentials stored as **GitHub Secrets**.
 
 ### Observability
 
 - **CloudWatch Dashboard** with: request count, error rate, p50/p99 latency, ECS task health.
 - **CloudWatch Logs** from every ECS service.
-- **Alarms** wired to rollback Lambda.
+- **Alarms** monitored by CodeDeploy for auto-rollback; also trigger notification Lambda → SNS.
 
 ---
 

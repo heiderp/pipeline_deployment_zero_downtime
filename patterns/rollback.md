@@ -2,86 +2,95 @@
 
 ## Overview
 
-If the green environment fails health validation, the pipeline **automatically reverts** traffic to the blue environment. No manual approval is needed — speed is critical to preserving availability.
+CodeDeploy orchestrates Blue/Green deployments and **handles rollback automatically**
+when CloudWatch alarms fire during the deployment. No manual intervention is needed.
+The notification Lambda sends alerts to Slack/email for visibility.
 
 ## Decision Tree
 
 ```
-Green deployed and receiving traffic
+Green deployed (CodeDeploy)
             │
             ▼
     ┌───────────────┐
-    │ Health Check   │
-    │ Monitoring     │
+    │ CloudWatch     │
+    │ Alarms Active  │
     └───────┬───────┘
             │
    ┌────────┼────────┐
    ▼                 ▼
-Pass ✅           Fail ❌
+No alarms ✅      Alarm fires ❌
    │                 │
    ▼                 ▼
-Continue         Rollback
-Cleanup          Triggered
+Canary continues  CodeDeploy auto-rolls back
+Bake completes    ┌────────────────────┐
+   │               │ 1. Revert traffic  │
+   ▼               │    to blue TGs     │
+Cleanup Blue      │ 2. Drain green     │
+   │               │    task set        │
+   ▼               │ 3. Notify Lambda   │
+Success ✅        │    → SNS → Slack   │
+                  └────────────────────┘
 ```
 
 ## Rollback Triggers (CloudWatch Alarms)
 
-| Alarm                 | Threshold                         | Period | Evaluation   |
-| --------------------- | --------------------------------- | ------ | ------------ |
-| `Green-HighErrorRate` | Error rate > 5%                   | 1 min  | 3 datapoints |
-| `Green-HighLatency`   | p99 latency > 2000ms              | 1 min  | 3 datapoints |
-| `Green-LowThroughput` | Throughput drop > 20% vs baseline | 2 min  | 2 datapoints |
-| `Green-TaskUnhealthy` | Any task fails health check       | 1 min  | 1 datapoint  |
+These alarms are monitored by **CodeDeploy** during deployment. Any alarm
+in `ALARM` state triggers an automatic rollback.
 
-## Rollback Actions (in order)
+| Alarm                     | Threshold            | Period | Evaluation |
+|---------------------------|----------------------|--------|------------|
+| `Green-HighErrorRate`     | Error rate > 5%      | 1 min  | 3 datapoints |
+| `Green-HighLatency`       | p99 latency > 2000ms | 1 min  | 3 datapoints |
+| `Green-LowThroughput`     | Request count drops  | 2 min  | 2 datapoints |
+| `Green-TaskUnhealthy`     | Any task fails health check | 1 min  | 1 datapoint |
 
-### 1. Notify Team
+## Rollback Flow (fully automated)
 
-Immediately post to Slack/email with:
+### 1. CloudWatch Alarm Fires
+CodeDeploy detects the alarm state change during the canary or bake phase.
 
-- Service name and environment.
-- Reason for rollback (which alarm fired, current metric value).
-- Link to CloudWatch dashboard and logs.
-- Commit SHA that was being deployed.
+### 2. CodeDeploy Auto-Rollback
+- **Production traffic** is immediately reverted to the blue task set (original task definition).
+- **Green task set** is drained and terminated.
+- Deployment status is marked as `STOPPED` or `FAILED`.
 
-### 2. Revert Traffic to Blue
+### 3. Notification Lambda
+- The same alarm that triggered the rollback also invokes the notification Lambda
+  via `alarm_actions`.
+- Lambda publishes to SNS → can fan out to Slack, email, PagerDuty.
+- The Lambda does **not** perform rollback actions — CodeDeploy already did it.
 
-- Lambda function calls ECS API to update ALB listener rules:
-  - Blue target group weight → 100%.
-  - Green target group weight → 0%.
-- **No new deployment happens** — the existing blue tasks are still running and healthy.
+### 4. GitHub Actions `rollback` Job
+- The `deploy-green` or `wait-deploy` job fails (CodeDeploy returned non-success).
+- The `rollback` job (`if: failure()`) fires and posts a Slack notification with
+  deployment context (commit SHA, environment, run link).
+- No AWS API calls — CodeDeploy already handled everything.
 
-### 3. Drain and Terminate Green
+## Why CodeDeploy + Lambda (two layers)
 
-- Stop sending new connections to green tasks (drain mode, 30s timeout).
-- Decrease green desired count to 0 (terminate tasks).
+| Layer | Responsibility |
+|-------|---------------|
+| **CodeDeploy** | Reverts traffic, drains green, marks deployment failed |
+| **Lambda** | Notifies team via SNS/Slack |
+| **GitHub Actions rollback job** | Posts deployment-level context (commit, PR, run link) |
 
-### 4. Tag Commit as Failed
+This separation means even if Slack is down, the rollback still happens.
 
-- `git tag` the commit as `rollback-<timestamp>`.
-- Create a GitHub issue with rollback details for post-mortem.
-
-## Terraform: Rollback Lambda
+## Terraform: Auto-Rollback Configuration
 
 ```hcl
-resource "aws_lambda_function" "rollback" {
-  filename      = "lambda/rollback.zip"
-  function_name = "${var.environment}-ecs-rollback"
-  role          = aws_iam_role.rollback_lambda.arn
-  handler       = "index.handler"
-  runtime       = "python3.11"
+# CodeDeploy deployment group with auto-rollback
+resource "aws_codedeploy_deployment_group" "flask" {
+  # ...
 
-  environment {
-    variables = {
-      CLUSTER_NAME    = aws_ecs_cluster.main.name
-      SERVICE_NAME    = aws_ecs_service.app.name
-      BLUE_TG_ARN     = aws_lb_target_group.blue.arn
-      GREEN_TG_ARN    = aws_lb_target_group.green.arn
-      SLACK_WEBHOOK   = var.slack_webhook_url
-    }
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
   }
 }
 
+# CloudWatch alarm → Lambda (notification only)
 resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
   alarm_name          = "${var.environment}-Green-HighErrorRate"
   comparison_operator = "GreaterThanThreshold"
@@ -90,8 +99,17 @@ resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
   namespace           = "AWS/ApplicationELB"
   period              = 60
   statistic           = "Sum"
-  threshold           = 5
-  alarm_actions       = [aws_lambda_function.rollback.arn]
+  threshold           = var.alarm_error_rate_threshold
+  alarm_actions       = [aws_lambda_function.notify.arn]  # notify only
+  # CodeDeploy monitors this alarm independently — no alarm_actions needed
+}
+
+# Lambda permission for CloudWatch
+resource "aws_lambda_permission" "cloudwatch" {
+  statement_id  = "AllowCloudWatchAlarm"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.notify.function_name
+  principal     = "lambda.alarms.cloudwatch.amazonaws.com"
 }
 ```
 
@@ -104,7 +122,7 @@ resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
     {
       "type": "section",
       "text": {
-        "text": "*Environment:* staging\n*Service:* flask-app\n*Alarm:* Green-HighErrorRate (7.2%)\n*Commit:* abc1234\n*Dashboard:* <link>"
+        "text": "*Environment:* staging\n*Service:* flask-app\n*Alarm:* Green-HighErrorRate (7.2%)\n*Action:* CodeDeploy auto-rolled back\n*Commit:* abc1234\n*Run:* <link>"
       }
     }
   ]
@@ -113,6 +131,29 @@ resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
 
 ## Testing the Rollback
 
-- The pipeline includes a **smoke test** phase that intentionally fails if health endpoints don't respond.
-- For disaster recovery testing: trigger a rollback manually via AWS Console or CLI to verify the Lambda works.
-- Post-mortem: every rollback generates a GitHub issue with the incident timeline.
+### Simulated failure
+1. Deploy a broken image that fails health checks → CodeDeploy detects unhealthy
+   tasks and rolls back.
+2. Check CodeDeploy console: deployment status shows `Stopped` with reason.
+3. Check CloudWatch logs for the notification Lambda.
+
+### Manual rollback (disaster recovery)
+```bash
+# Stop an in-progress CodeDeploy deployment
+aws deploy stop-deployment --deployment-id d-XXXXXXXXX
+
+# Or force-rollback via ECS (last resort)
+aws ecs update-service --cluster dev-cluster --service dev-flask \
+  --task-definition <previous-task-def-arn> --force-new-deployment
+```
+
+### Verify rollback completed
+```bash
+# Check ALB traffic is on blue
+aws elbv2 describe-rules --listener-arn <prod-listener-arn> \
+  --query 'Rules[*].Actions[*].ForwardConfig.TargetGroups[*].Weight'
+
+# Check green tasks are terminated
+aws ecs describe-services --cluster dev-cluster --services dev-flask \
+  --query 'services[0].taskSets[?status==`DRAINING`]'
+```

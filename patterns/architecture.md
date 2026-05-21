@@ -79,22 +79,30 @@
 3. **Node App** polls **SQS**, processes messages, writes results to **RDS**.
 4. **Spring App** subscribes to **SNS**, processes events, stores in **RDS**.
 
-## Deployment Flow (Blue/Green)
+## Deployment Flow (CodeDeploy Blue/Green)
 
 ```
 main push
     │
     ▼
-┌─────────┐    ┌─────────┐    ┌──────────┐    ┌───────────┐    ┌────────┐
-│  Build  │───►│  Test   │───►│  Push to │───►│  Deploy   │───►│ Health │
-│  Images │    │ (Floci) │    │   ECR    │    │  Green    │    │ Check  │
-└─────────┘    └─────────┘    └──────────┘    └───────────┘    └───┬────┘
-                                                                    │
-                                              ┌─────────────────────┼──────────────┐
-                                              ▼                     ▼              ▼
-                                        ┌──────────┐         ┌──────────┐   ┌──────────┐
-                                        │  Pass?   │         │  Fail?   │   │  Bake    │
-                                        │  Shift   │         │ Rollback │   │  Time    │
-                                        │  Traffic │         │  + Notify│   │  (N min) │
-                                        └──────────┘         └──────────┘   └──────────┘
-```
+┌─────────┐    ┌─────────┐    ┌──────────┐    ┌──────────────┐    ┌────────────┐
+│  Build  │───►│  Test   │───►│  Push to │───►│  Terraform   │───►│  CodeDeploy│
+│  Images │    │ (Floci) │    │   ECR    │    │   Apply      │    │  Create    │
+└─────────┘    └─────────┘    └──────────┘    └──────────────┘    │  Deployment│
+                                                                    └──────┬─────┘
+                                                                           │
+       ┌───────────────────────────────────────────────────────────────────┤
+       │                    CodeDeploy handles the rest                    │
+       │                                                                   │
+       ▼                         ▼                         ▼               ▼
+┌──────────────┐    ┌──────────────────┐    ┌──────────────┐    ┌──────────────┐
+│  Deploy      │───►│  Canary Shift    │───►│  Bake Time    │───►│  Cleanup     │
+│  Green Tasks │    │  10% / 5min      │    │  Alarms watch │    │  Blue drained│
+└──────────────┘    └───────┬──────────┘    └──────┬───────┘    └──────────────┘
+                            │                      │
+                            ▼                      ▼
+                     ┌──────────────┐      ┌──────────────┐
+                     │  Alarm?      │      │  Success?    │
+                     │  Auto-roll   │      │  Lambda      │
+                     │  back        │      │  notifies    │
+                     └──────────────┘      └──────────────┘
