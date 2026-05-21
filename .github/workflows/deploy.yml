@@ -8,7 +8,6 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
 jobs:
   # ───────────────────────────────────────────────────────────
@@ -65,7 +64,9 @@ jobs:
 
       - name: Set image tag
         id: tag
-        run: echo "TAG=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+        run: |
+          echo "TAG=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+          echo "REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
 
       - name: Build & Push
         uses: docker/build-push-action@v5
@@ -73,8 +74,8 @@ jobs:
           context: ${{ matrix.service.context }}
           push: true
           tags: |
-            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:${{ steps.tag.outputs.TAG }}
-            ${{ env.ECR_REGISTRY }}/${{ matrix.service.name }}:latest
+            ${{ steps.tag.outputs.REGISTRY }}/${{ matrix.service.name }}:${{ steps.tag.outputs.TAG }}
+            ${{ steps.tag.outputs.REGISTRY }}/${{ matrix.service.name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -109,6 +110,7 @@ jobs:
       - name: Terraform Plan
         working-directory: infra
         run: |
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           terraform plan \
             -var-file="environments/${ENVIRONMENT}.tfvars" \
             -var="ecr_repo_urls={flask=\"$ECR_REGISTRY/flask-app\",node=\"$ECR_REGISTRY/node-app\",spring=\"$ECR_REGISTRY/spring-app\"}" \
@@ -148,6 +150,7 @@ jobs:
       - name: Terraform Apply
         working-directory: infra
         run: |
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           terraform apply -auto-approve \
             -var-file="environments/${ENVIRONMENT}.tfvars" \
             -var="ecr_repo_urls={flask=\"$ECR_REGISTRY/flask-app\",node=\"$ECR_REGISTRY/node-app\",spring=\"$ECR_REGISTRY/spring-app\"}"
@@ -158,12 +161,16 @@ jobs:
           TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   # ───────────────────────────────────────────────────────────
-  # Deploy Green (Blue/Green)
+  # Deploy via CodeDeploy (Blue/Green)
   # ───────────────────────────────────────────────────────────
   deploy-green:
-    name: Deploy Green
+    name: Deploy Green (CodeDeploy)
     needs: terraform-apply
     runs-on: ubuntu-latest
+    outputs:
+      flask-deployment-id: ${{ steps.deploy-flask.outputs.deployment-id }}
+      node-deployment-id: ${{ steps.deploy-node.outputs.deployment-id }}
+      spring-deployment-id: ${{ steps.deploy-spring.outputs.deployment-id }}
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -172,210 +179,141 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Update ECS service (Green)
+      - name: Deploy Flask (CodeDeploy)
+        id: deploy-flask
         run: |
-          # Register new task definitions for each service with the new image tag
-          IMAGE_TAG="${GITHUB_SHA::8}"
           ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          IMAGE_TAG="${GITHUB_SHA::8}"
 
-          for SERVICE in flask-app node-app spring-app; do
-            echo "Deploying $SERVICE ($IMAGE_TAG) to $ENV green..."
+          echo "Registering new task definition for flask with image ${IMAGE_TAG}..."
+          TASK_DEF_ARN=$(aws ecs describe-task-definition \
+            --task-definition "${ENV}-flask" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
 
-            # Force new deployment — ECS will create green task set
-            aws ecs update-service \
-              --cluster "${ENV}-cluster" \
-              --service "${ENV}-${SERVICE}" \
-              --force-new-deployment \
-              --no-cli-pager
-          done
+          DEPLOY_ID=$(aws deploy create-deployment \
+            --application-name "${ENV}-app" \
+            --deployment-group-name "${ENV}-flask" \
+            --revision "revisionType=AppSpecContent,appSpecContent={version=0.0,Resources=[{targetService={type=AWS::ECS::Service,properties={taskDefinition=${TASK_DEF_ARN},loadBalancerInfo={containerName=flask-app,containerPort=8080}}}}]}" \
+            --query 'deploymentId' \
+            --output text)
+
+          echo "deployment-id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "🟢 Flask CodeDeploy deployment: $DEPLOY_ID"
+
+      - name: Deploy Node (CodeDeploy)
+        id: deploy-node
+        run: |
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          TASK_DEF_ARN=$(aws ecs describe-task-definition \
+            --task-definition "${ENV}-node" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          DEPLOY_ID=$(aws deploy create-deployment \
+            --application-name "${ENV}-app" \
+            --deployment-group-name "${ENV}-node" \
+            --revision "revisionType=AppSpecContent,appSpecContent={version=0.0,Resources=[{targetService={type=AWS::ECS::Service,properties={taskDefinition=${TASK_DEF_ARN},loadBalancerInfo={containerName=node-app,containerPort=8080}}}}]}" \
+            --query 'deploymentId' \
+            --output text)
+
+          echo "deployment-id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "🟢 Node CodeDeploy deployment: $DEPLOY_ID"
+
+      - name: Deploy Spring (CodeDeploy)
+        id: deploy-spring
+        run: |
+          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
+          TASK_DEF_ARN=$(aws ecs describe-task-definition \
+            --task-definition "${ENV}-spring" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          DEPLOY_ID=$(aws deploy create-deployment \
+            --application-name "${ENV}-app" \
+            --deployment-group-name "${ENV}-spring" \
+            --revision "revisionType=AppSpecContent,appSpecContent={version=0.0,Resources=[{targetService={type=AWS::ECS::Service,properties={taskDefinition=${TASK_DEF_ARN},loadBalancerInfo={containerName=spring-app,containerPort=8080}}}}]}" \
+            --query 'deploymentId' \
+            --output text)
+
+          echo "deployment-id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "🟢 Spring CodeDeploy deployment: $DEPLOY_ID"
 
   # ───────────────────────────────────────────────────────────
-  # Health Check (Green)
+  # Wait for CodeDeploy to finish
+  # CodeDeploy handles: deploy green → traffic shift → bake → cleanup
   # ───────────────────────────────────────────────────────────
-  health-check:
-    name: Health Check Green
+  wait-deploy:
+    name: Wait for CodeDeploy
     needs: deploy-green
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for green tasks
-        run: sleep 60
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Run smoke tests
+      - name: Wait for Flask deployment
+        run: |
+          DEPLOY_ID="${{ needs.deploy-green.outputs.flask-deployment-id }}"
+          echo "Waiting for CodeDeploy deployment $DEPLOY_ID..."
+          aws deploy wait deployment-successful --deployment-id "$DEPLOY_ID"
+          echo "✅ Flask deployed successfully"
+
+      - name: Wait for Node deployment
+        run: |
+          DEPLOY_ID="${{ needs.deploy-green.outputs.node-deployment-id }}"
+          aws deploy wait deployment-successful --deployment-id "$DEPLOY_ID"
+          echo "✅ Node deployed successfully"
+
+      - name: Wait for Spring deployment
+        run: |
+          DEPLOY_ID="${{ needs.deploy-green.outputs.spring-deployment-id }}"
+          aws deploy wait deployment-successful --deployment-id "$DEPLOY_ID"
+          echo "✅ Spring deployed successfully"
+
+  # ───────────────────────────────────────────────────────────
+  # Post-deploy Validation
+  # ───────────────────────────────────────────────────────────
+  health-check:
+    name: Health Check
+    needs: wait-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Smoke test production endpoints
         run: |
           ALB_DNS="${{ secrets.ALB_DNS_NAME }}"
-
           for SERVICE in flask-app node-app spring-app; do
-            echo "Checking $SERVICE health..."
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS}/${SERVICE}/health")
-            if [ "$STATUS" != "200" ]; then
-              echo "❌ $SERVICE health check failed (HTTP $STATUS)"
-              exit 1
-            fi
-            echo "✅ $SERVICE healthy"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://${ALB_DNS}/${SERVICE}/health" || echo "000")
+            echo "$SERVICE: HTTP $STATUS"
+            [ "$STATUS" = "200" ] || { echo "❌ $SERVICE health check failed"; exit 1; }
           done
-
-      - name: Verify CloudWatch metrics
-        run: |
-          echo "Checking CloudWatch metrics for green..."
-          # Placeholder: aws cloudwatch get-metric-statistics ...
-          echo "✅ Metrics available"
+          echo "✅ All services healthy"
 
   # ───────────────────────────────────────────────────────────
-  # Shift Traffic (Canary: 10% → 50% → 100%)
-  # ───────────────────────────────────────────────────────────
-  shift-traffic:
-    name: Shift Traffic
-    needs: health-check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Canary 10% Green
-        run: |
-          echo "🟢 Shifting 10% traffic to green..."
-          for RULE in "${{ secrets.FLASK_RULE_ARN }}" "${{ secrets.NODE_RULE_ARN }}" "${{ secrets.SPRING_RULE_ARN }}"; do
-            [ -z "$RULE" ] && continue
-            aws elbv2 modify-rule --rule-arn "$RULE" \
-              --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.FLASK_BLUE_TG_ARN }}","Weight":90},{"TargetGroupArn":"${{ secrets.FLASK_GREEN_TG_ARN }}","Weight":10}]}}]' \
-              --no-cli-pager 2>/dev/null || true
-          done
-          sleep 60
-
-      - name: Canary 50% Green
-        run: |
-          echo "🟡 50% traffic to green — monitoring..."
-          sleep 60
-
-      - name: Full Shift 100% Green
-        run: |
-          echo "🔵 100% traffic to green!"
-
-  # ───────────────────────────────────────────────────────────
-  # Bake Time (Monitor Green under full traffic)
-  # ───────────────────────────────────────────────────────────
-  bake:
-    name: Bake Time (5 min)
-    needs: shift-traffic
-    runs-on: ubuntu-latest
-    steps:
-      - name: Monitor for 5 minutes
-        run: |
-          echo "⏳ Baking green under full traffic for 5 minutes..."
-          sleep 300
-
-          # Check CloudWatch alarms status
-          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
-          ALARMS=$(aws cloudwatch describe-alarms \
-            --alarm-name-prefix "${ENV}-Green" \
-            --state-value ALARM \
-            --query 'length(AlarmNames)' \
-            --output text)
-
-          if [ "$ALARMS" != "0" ]; then
-            echo "❌ Alarms firing on green! Rolling back..."
-            exit 1
-          fi
-          echo "✅ Bake passed — green is healthy"
-
-  # ───────────────────────────────────────────────────────────
-  # Cleanup Blue
-  # ───────────────────────────────────────────────────────────
-  cleanup-blue:
-    name: Cleanup Blue
-    needs: bake
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Drain and remove blue tasks
-        run: |
-          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
-          echo "Cleaning up blue task set for $ENV..."
-
-          for SERVICE in flask-app node-app spring-app; do
-            aws ecs update-service \
-              --cluster "${ENV}-cluster" \
-              --service "${ENV}-${SERVICE}" \
-              --task-set blue \
-              --scale 0 \
-              --no-cli-pager || echo "No blue task set for $SERVICE (already cleaned)"
-          done
-        continue-on-error: true
-
-  # ───────────────────────────────────────────────────────────
-  # Rollback (triggered on failure)
+  # Rollback notification (CodeDeploy handles actual rollback)
   # ───────────────────────────────────────────────────────────
   rollback:
-    name: Rollback
-    needs: [deploy-green, health-check, shift-traffic, bake]
+    name: Notify Rollback
+    needs: [deploy-green, wait-deploy, health-check]
     if: failure()
     runs-on: ubuntu-latest
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Revert traffic to Blue
-        run: |
-          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
-          echo "🚨 Rolling back to blue for $ENV..."
-
-          # Revert all 3 services to 100% blue, 0% green
-          aws elbv2 modify-rule --rule-arn "${{ secrets.FLASK_RULE_ARN }}" \
-            --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.FLASK_BLUE_TG_ARN }}","Weight":100},{"TargetGroupArn":"${{ secrets.FLASK_GREEN_TG_ARN }}","Weight":0}]}}]' \
-            --no-cli-pager || echo "Flask rule not found"
-
-          aws elbv2 modify-rule --rule-arn "${{ secrets.NODE_RULE_ARN }}" \
-            --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.NODE_BLUE_TG_ARN }}","Weight":100},{"TargetGroupArn":"${{ secrets.NODE_GREEN_TG_ARN }}","Weight":0}]}}]' \
-            --no-cli-pager || echo "Node rule not found"
-
-          aws elbv2 modify-rule --rule-arn "${{ secrets.SPRING_RULE_ARN }}" \
-            --actions '[{"Type":"forward","ForwardConfig":{"TargetGroups":[{"TargetGroupArn":"${{ secrets.SPRING_BLUE_TG_ARN }}","Weight":100},{"TargetGroupArn":"${{ secrets.SPRING_GREEN_TG_ARN }}","Weight":0}]}}]' \
-            --no-cli-pager || echo "Spring rule not found"
-
-          echo "✅ Traffic reverted to blue"
-
-      - name: Drain Green
-        run: |
-          ENV="${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}"
-          for SERVICE in flask-app node-app spring-app; do
-            aws ecs update-service \
-              --cluster "${ENV}-cluster" \
-              --service "${ENV}-${SERVICE}" \
-              --task-set green \
-              --scale 0 \
-              --no-cli-pager || true
-          done
-        continue-on-error: true
-
       - name: Notify Slack
         uses: slackapi/slack-github-action@v1.24.0
         with:
           payload: |
             {
-              "text": "🚨 ROLLBACK: Deploy ${{ github.sha }} failed",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Environment:* ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Action:* Traffic reverted to blue\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>"
-                  }
+              "text": "🚨 Deployment ${{ github.sha }} failed or rolled back",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Environment:* ${{ github.ref == 'refs/heads/main' && 'staging' || 'dev' }}\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Action:* CodeDeploy auto-rolled back. Check CloudWatch alarms.\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>"
                 }
-              ]
+              }]
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

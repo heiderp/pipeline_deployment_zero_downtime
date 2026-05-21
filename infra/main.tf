@@ -185,6 +185,23 @@ resource "aws_lb_listener" "main" {
   }
 }
 
+# Test listener for CodeDeploy Blue/Green (port 8081)
+# CodeDeploy routes green traffic here during deployment validation
+resource "aws_lb_listener" "test" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 8081
+  protocol          = "HTTP"
+
+  default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Green test listener — OK"
+      status_code  = 200
+    }
+  }
+}
+
 # ─────────────────────────────────────────────────────────────
 # ALB Target Groups (per-service Blue/Green pairs)
 # ─────────────────────────────────────────────────────────────
@@ -765,6 +782,10 @@ resource "aws_ecs_service" "flask" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
+  deployment_controller {
+    type = "CODE_DEPLOY"
+  }
+
   network_configuration {
     subnets          = module.vpc.private_subnets
     security_groups  = [aws_security_group.ecs_tasks.id]
@@ -777,15 +798,6 @@ resource "aws_ecs_service" "flask" {
     container_port   = 8080
   }
 
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  lifecycle {
-    ignore_changes = [task_definition, load_balancer]
-  }
-
   depends_on = [aws_lb_listener_rule.flask]
 }
 
@@ -795,6 +807,10 @@ resource "aws_ecs_service" "node" {
   task_definition = aws_ecs_task_definition.node.arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
+
+  deployment_controller {
+    type = "CODE_DEPLOY"
+  }
 
   network_configuration {
     subnets          = module.vpc.private_subnets
@@ -808,15 +824,6 @@ resource "aws_ecs_service" "node" {
     container_port   = 8080
   }
 
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  lifecycle {
-    ignore_changes = [task_definition, load_balancer]
-  }
-
   depends_on = [aws_lb_listener_rule.node]
 }
 
@@ -826,6 +833,10 @@ resource "aws_ecs_service" "spring" {
   task_definition = aws_ecs_task_definition.spring.arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
+
+  deployment_controller {
+    type = "CODE_DEPLOY"
+  }
 
   network_configuration {
     subnets          = module.vpc.private_subnets
@@ -839,24 +850,166 @@ resource "aws_ecs_service" "spring" {
     container_port   = 8080
   }
 
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  lifecycle {
-    ignore_changes = [task_definition, load_balancer]
-  }
-
   depends_on = [aws_lb_listener_rule.spring]
 }
 
 # ─────────────────────────────────────────────────────────────
-# Rollback Lambda
+# CodeDeploy (Blue/Green orchestration)
 # ─────────────────────────────────────────────────────────────
 
-resource "aws_iam_role" "rollback_lambda" {
-  name = "${var.environment}-rollback-lambda"
+resource "aws_codedeploy_app" "main" {
+  name             = "${var.environment}-app"
+  compute_platform = "ECS"
+}
+
+# CodeDeploy IAM role
+resource "aws_iam_role" "codedeploy" {
+  name = "${var.environment}-codedeploy"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "codedeploy.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "codedeploy" {
+  role       = aws_iam_role.codedeploy.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS"
+}
+
+# ── Flask deployment group ──────────────────────────────────
+
+resource "aws_codedeploy_deployment_group" "flask" {
+  app_name               = aws_codedeploy_app.main.name
+  deployment_group_name  = "${var.environment}-flask"
+  service_role_arn       = aws_iam_role.codedeploy.arn
+  deployment_config_name = "CodeDeployDefault.ECSCanary10Percent5Minutes"
+
+  deployment_style {
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+    deployment_type   = "BLUE_GREEN"
+  }
+
+  ecs_service {
+    cluster_name = aws_ecs_cluster.main.name
+    service_name = aws_ecs_service.flask.name
+  }
+
+  load_balancer_info {
+    target_group_pair_info {
+      prod_traffic_route {
+        listener_arns = [aws_lb_listener.main.arn]
+      }
+      test_traffic_route {
+        listener_arns = [aws_lb_listener.test.arn]
+      }
+      target_group {
+        name = aws_lb_target_group.flask_blue.name
+      }
+      target_group {
+        name = aws_lb_target_group.flask_green.name
+      }
+    }
+  }
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
+  }
+}
+
+# ── Node deployment group ───────────────────────────────────
+
+resource "aws_codedeploy_deployment_group" "node" {
+  app_name               = aws_codedeploy_app.main.name
+  deployment_group_name  = "${var.environment}-node"
+  service_role_arn       = aws_iam_role.codedeploy.arn
+  deployment_config_name = "CodeDeployDefault.ECSCanary10Percent5Minutes"
+
+  deployment_style {
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+    deployment_type   = "BLUE_GREEN"
+  }
+
+  ecs_service {
+    cluster_name = aws_ecs_cluster.main.name
+    service_name = aws_ecs_service.node.name
+  }
+
+  load_balancer_info {
+    target_group_pair_info {
+      prod_traffic_route {
+        listener_arns = [aws_lb_listener.main.arn]
+      }
+      test_traffic_route {
+        listener_arns = [aws_lb_listener.test.arn]
+      }
+      target_group {
+        name = aws_lb_target_group.node_blue.name
+      }
+      target_group {
+        name = aws_lb_target_group.node_green.name
+      }
+    }
+  }
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
+  }
+}
+
+# ── Spring deployment group ─────────────────────────────────
+
+resource "aws_codedeploy_deployment_group" "spring" {
+  app_name               = aws_codedeploy_app.main.name
+  deployment_group_name  = "${var.environment}-spring"
+  service_role_arn       = aws_iam_role.codedeploy.arn
+  deployment_config_name = "CodeDeployDefault.ECSCanary10Percent5Minutes"
+
+  deployment_style {
+    deployment_option = "WITH_TRAFFIC_CONTROL"
+    deployment_type   = "BLUE_GREEN"
+  }
+
+  ecs_service {
+    cluster_name = aws_ecs_cluster.main.name
+    service_name = aws_ecs_service.spring.name
+  }
+
+  load_balancer_info {
+    target_group_pair_info {
+      prod_traffic_route {
+        listener_arns = [aws_lb_listener.main.arn]
+      }
+      test_traffic_route {
+        listener_arns = [aws_lb_listener.test.arn]
+      }
+      target_group {
+        name = aws_lb_target_group.spring_blue.name
+      }
+      target_group {
+        name = aws_lb_target_group.spring_green.name
+      }
+    }
+  }
+
+  auto_rollback_configuration {
+    enabled = true
+    events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
+  }
+}
+
+# ─────────────────────────────────────────────────────────────
+# Notification Lambda (CloudWatch alarm → Slack notify)
+# ─────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "notify_lambda" {
+  name = "${var.environment}-notify-lambda"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -868,86 +1021,57 @@ resource "aws_iam_role" "rollback_lambda" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "rollback_lambda_basic" {
-  role       = aws_iam_role.rollback_lambda.name
+resource "aws_iam_role_policy_attachment" "notify_lambda_basic" {
+  role       = aws_iam_role.notify_lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-resource "aws_iam_role_policy" "rollback_lambda_ecs" {
-  name = "${var.environment}-rollback-ecs-access"
-  role = aws_iam_role.rollback_lambda.id
+resource "aws_iam_role_policy" "notify_lambda_sns" {
+  name = "${var.environment}-notify-sns"
+  role = aws_iam_role.notify_lambda.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "elasticloadbalancing:ModifyRule",
-          "elasticloadbalancing:DescribeRules",
-        ]
-        Resource = [
-          aws_lb_listener_rule.flask.arn,
-          aws_lb_listener_rule.node.arn,
-          aws_lb_listener_rule.spring.arn,
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ecs:UpdateService",
-          "ecs:DescribeServices",
-        ]
-        Resource = [
-          aws_ecs_service.flask.id,
-          aws_ecs_service.node.id,
-          aws_ecs_service.spring.id,
-        ]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["sns:Publish"]
-        Resource = [aws_sns_topic.events.arn]
-      },
-    ]
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["sns:Publish"]
+      Resource = [aws_sns_topic.events.arn]
+    }]
   })
 }
 
-resource "aws_lambda_function" "rollback" {
+resource "aws_lambda_function" "notify" {
   filename         = "${path.module}/lambda/rollback.zip"
-  function_name    = "${var.environment}-ecs-rollback"
-  role             = aws_iam_role.rollback_lambda.arn
-  handler          = "index.handler"
+  function_name    = "${var.environment}-alarm-notify"
+  role             = aws_iam_role.notify_lambda.arn
+  handler          = "notify.handler"
   runtime          = "python3.12"
-  timeout          = 60
+  timeout          = 30
   source_code_hash = filebase64sha256("${path.module}/lambda/rollback.zip")
 
   environment {
     variables = {
-      ENVIRONMENT         = var.environment
-      FLASK_RULE_ARN      = aws_lb_listener_rule.flask.arn
-      NODE_RULE_ARN       = aws_lb_listener_rule.node.arn
-      SPRING_RULE_ARN     = aws_lb_listener_rule.spring.arn
-      FLASK_BLUE_TG_ARN   = aws_lb_target_group.flask_blue.arn
-      FLASK_GREEN_TG_ARN  = aws_lb_target_group.flask_green.arn
-      NODE_BLUE_TG_ARN    = aws_lb_target_group.node_blue.arn
-      NODE_GREEN_TG_ARN   = aws_lb_target_group.node_green.arn
-      SPRING_BLUE_TG_ARN  = aws_lb_target_group.spring_blue.arn
-      SPRING_GREEN_TG_ARN = aws_lb_target_group.spring_green.arn
-      CLUSTER_NAME        = aws_ecs_cluster.main.name
-      FLASK_SERVICE       = aws_ecs_service.flask.name
-      NODE_SERVICE        = aws_ecs_service.node.name
-      SPRING_SERVICE      = aws_ecs_service.spring.name
+      ENVIRONMENT = var.environment
+      SNS_TOPIC   = aws_sns_topic.events.arn
     }
   }
 
-  tags = {
-    Environment = var.environment
-  }
+  tags = { Environment = var.environment }
 }
 
+# Allow CloudWatch alarms to invoke the notification Lambda
+resource "aws_lambda_permission" "cloudwatch" {
+  statement_id  = "AllowCloudWatchAlarm"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.notify.function_name
+  principal     = "lambda.alarms.cloudwatch.amazonaws.com"
+  source_arn    = "arn:aws:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:*"
+}
+
+data "aws_caller_identity" "current" {}
+
 # ─────────────────────────────────────────────────────────────
-# CloudWatch Alarms (trigger rollback Lambda)
+# CloudWatch Alarms (notify Lambda via alarm_actions; CodeDeploy handles rollback)
 # ─────────────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
@@ -959,8 +1083,8 @@ resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
   period              = 60
   statistic           = "Sum"
   threshold           = var.alarm_error_rate_threshold
-  alarm_description   = "Triggers rollback if 5XX errors exceed threshold on green"
-  alarm_actions       = [aws_lambda_function.rollback.arn]
+  alarm_description   = "High 5XX rate on green — CodeDeploy auto-rolls back, Lambda notifies"
+  alarm_actions       = [aws_lambda_function.notify.arn]
 
   dimensions = {
     LoadBalancer = aws_lb.main.arn_suffix
@@ -980,8 +1104,8 @@ resource "aws_cloudwatch_metric_alarm" "high_latency" {
   extended_statistic  = "p99"
   period              = 60
   threshold           = var.alarm_latency_threshold_ms
-  alarm_description   = "Triggers rollback if p99 latency exceeds threshold on green"
-  alarm_actions       = [aws_lambda_function.rollback.arn]
+  alarm_description   = "High p99 latency on green — CodeDeploy auto-rolls back, Lambda notifies"
+  alarm_actions       = [aws_lambda_function.notify.arn]
 
   dimensions = {
     LoadBalancer = aws_lb.main.arn_suffix
@@ -1001,8 +1125,8 @@ resource "aws_cloudwatch_metric_alarm" "low_throughput" {
   period              = 120
   statistic           = "Sum"
   threshold           = var.alarm_throughput_threshold
-  alarm_description   = "Triggers rollback if request count drops below threshold on green"
-  alarm_actions       = [aws_lambda_function.rollback.arn]
+  alarm_description   = "Request count dropped — CodeDeploy auto-rolls back, Lambda notifies"
+  alarm_actions       = [aws_lambda_function.notify.arn]
 
   dimensions = {
     LoadBalancer = aws_lb.main.arn_suffix
@@ -1022,8 +1146,8 @@ resource "aws_cloudwatch_metric_alarm" "task_unhealthy" {
   period              = 60
   statistic           = "Average"
   threshold           = 1
-  alarm_description   = "Triggers rollback if no healthy green tasks"
-  alarm_actions       = [aws_lambda_function.rollback.arn]
+  alarm_description   = "No healthy green tasks — CodeDeploy auto-rolls back, Lambda notifies"
+  alarm_actions       = [aws_lambda_function.notify.arn]
 
   dimensions = {
     LoadBalancer = aws_lb.main.arn_suffix

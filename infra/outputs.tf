@@ -137,9 +137,19 @@ output "ecr_spring_url" {
   value       = aws_ecr_repository.spring.repository_url
 }
 
-output "rollback_lambda_arn" {
-  description = "Rollback Lambda function ARN"
-  value       = aws_lambda_function.rollback.arn
+output "test_listener_arn" {
+  description = "ALB test listener ARN (CodeDeploy green traffic)"
+  value       = aws_lb_listener.test.arn
+}
+
+output "codedeploy_app_name" {
+  description = "CodeDeploy application name"
+  value       = aws_codedeploy_app.main.name
+}
+
+output "notify_lambda_arn" {
+  description = "Notification Lambda function ARN"
+  value       = aws_lambda_function.notify.arn
 }
 
 output "flask_service_name" {
