@@ -920,6 +920,14 @@ resource "aws_codedeploy_deployment_group" "flask" {
     enabled = true
     events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
   }
+
+  alarm_configuration {
+    alarms = [
+      aws_cloudwatch_metric_alarm.high_error_rate.alarm_name,
+      aws_cloudwatch_metric_alarm.high_latency.alarm_name,
+      aws_cloudwatch_metric_alarm.low_throughput.alarm_name,
+    ]
+  }
 }
 
 # ── Node deployment group ───────────────────────────────────
@@ -961,6 +969,14 @@ resource "aws_codedeploy_deployment_group" "node" {
     enabled = true
     events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
   }
+
+  alarm_configuration {
+    alarms = [
+      aws_cloudwatch_metric_alarm.high_error_rate.alarm_name,
+      aws_cloudwatch_metric_alarm.high_latency.alarm_name,
+      aws_cloudwatch_metric_alarm.low_throughput.alarm_name,
+    ]
+  }
 }
 
 # ── Spring deployment group ─────────────────────────────────
@@ -1001,6 +1017,14 @@ resource "aws_codedeploy_deployment_group" "spring" {
   auto_rollback_configuration {
     enabled = true
     events  = ["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]
+  }
+
+  alarm_configuration {
+    alarms = [
+      aws_cloudwatch_metric_alarm.high_error_rate.alarm_name,
+      aws_cloudwatch_metric_alarm.high_latency.alarm_name,
+      aws_cloudwatch_metric_alarm.low_throughput.alarm_name,
+    ]
   }
 }
 

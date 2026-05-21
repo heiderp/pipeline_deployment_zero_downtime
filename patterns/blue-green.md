@@ -21,23 +21,27 @@ workflow only triggers the deployment and waits for CodeDeploy to finish.
 ```
 
 ### 1. Preparation (GitHub Actions)
+
 - GitHub Actions registers the new task definition with the updated ECR image tag.
 - Creates a CodeDeploy deployment referencing the new revision.
 - Passes the deployment ID to the wait step.
 
 ### 2. Deployment (CodeDeploy)
+
 - CodeDeploy creates a new (green) task set with the updated task definition.
 - Green tasks are registered with the **test listener** target groups (port 8081).
 - Production traffic (port 80) continues flowing to blue tasks.
 - Green tasks start and pass ELB health checks on the test listener.
 
 ### 3. Testing (via test listener)
+
 - While green runs behind the test listener, it can be validated independently:
   - `curl http://<alb>:8081/` → green-only traffic.
   - Smoke tests, integration tests, manual verification.
 - The GitHub Actions `health-check` job tests via the production listener after CodeDeploy succeeds.
 
 ### 4. Traffic Shift (Canary, CodeDeploy-managed)
+
 - CodeDeploy gradually shifts production traffic from blue to green:
   - **Canary mode** (`ECSCanary10Percent5Minutes`): 10% every 5 minutes.
   - Configurable via `deployment_config_name` in Terraform.
@@ -45,6 +49,7 @@ workflow only triggers the deployment and waits for CodeDeploy to finish.
 - Path-based routing rules (`/flask/*`, `/node/*`, `/spring/*`) are preserved.
 
 ### 5. Monitoring (Bake Time)
+
 - Green runs under full production traffic.
 - CloudWatch alarms are actively monitored by **CodeDeploy**:
   - Any alarm firing → CodeDeploy **automatically rolls back** (no human needed).
@@ -52,6 +57,7 @@ workflow only triggers the deployment and waits for CodeDeploy to finish.
 - Bake time is built into the canary intervals (5 minutes per step × 10 steps = 50 min max).
 
 ### 6. Cleanup
+
 - CodeDeploy drains connections from blue tasks.
 - Old blue task set is scaled to 0 and terminated.
 - The green task set becomes the new blue for the next deployment.
@@ -79,11 +85,11 @@ workflow only triggers the deployment and waits for CodeDeploy to finish.
 
 Each service has its own Blue/Green target group pair and CodeDeploy deployment group:
 
-| Service | Blue TG | Green TG | Deployment Group |
-|---------|---------|----------|-----------------|
-| Flask   | `dev-flask-blue` | `dev-flask-green` | `dev-flask` |
-| Node    | `dev-node-blue`  | `dev-node-green`  | `dev-node`  |
-| Spring  | `dev-spring-blue`| `dev-spring-green`| `dev-spring` |
+| Service | Blue TG           | Green TG           | Deployment Group |
+| ------- | ----------------- | ------------------ | ---------------- |
+| Flask   | `dev-flask-blue`  | `dev-flask-green`  | `dev-flask`      |
+| Node    | `dev-node-blue`   | `dev-node-green`   | `dev-node`       |
+| Spring  | `dev-spring-blue` | `dev-spring-green` | `dev-spring`     |
 
 All 3 deployment groups belong to the same CodeDeploy application (`dev-app`).
 
@@ -179,12 +185,12 @@ aws deploy wait deployment-successful --deployment-id "$DEPLOY_ID"
 
 ## Canary Configuration Options
 
-| Config Name | Traffic Pattern | Total Time |
-|-------------|----------------|------------|
-| `ECSCanary10Percent5Minutes` | 10% every 5 min | ~50 min |
-| `ECSCanary10Percent15Minutes` | 10% every 15 min | ~150 min |
-| `CodeDeployDefault.ECSLinear10PercentEvery1Minutes` | 10% every 1 min | ~10 min |
-| `CodeDeployDefault.ECSLinear10PercentEvery3Minutes` | 10% every 3 min | ~30 min |
+| Config Name                                         | Traffic Pattern  | Total Time |
+| --------------------------------------------------- | ---------------- | ---------- |
+| `ECSCanary10Percent5Minutes`                        | 10% every 5 min  | ~50 min    |
+| `ECSCanary10Percent15Minutes`                       | 10% every 15 min | ~150 min   |
+| `CodeDeployDefault.ECSLinear10PercentEvery1Minutes` | 10% every 1 min  | ~10 min    |
+| `CodeDeployDefault.ECSLinear10PercentEvery3Minutes` | 10% every 3 min  | ~30 min    |
 
 **Default for this project**: `ECSCanary10Percent5Minutes` (safe for PoC, can be
 shortened to `ECSLinear10PercentEvery1Minutes` for faster demo cycles).
